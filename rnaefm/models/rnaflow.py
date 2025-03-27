@@ -12,7 +12,7 @@ network_path = os.path.join('RoseTTAFold2NA/network')
 sys.path.append(network_path)
 from predict import Predictor
 
-utils_path = os.path.join('rnaflow/utils')
+utils_path = os.path.join('rnaefm/utils')
 sys.path.append(utils_path)
 import frame_utils
 import pdb_utils
@@ -21,7 +21,7 @@ from interpolant import Interpolant, _centered_gaussian, NM_TO_ANG_SCALE
 from models.inverse_folding import InverseFoldingModel
 
 model = "RoseTTAFold2NA/network/weights/RF2NA_apr23.pt"
-RF_DATA_FOLDER = "rnaflow/data/rf_data"
+RF_DATA_FOLDER = "rnaefm/data/rf_data"
 
 
 
@@ -87,17 +87,17 @@ def compute_lennard_jones_energy(batch_coords, epsilon=0.2, sigma=3.5, min_dista
 
 
 
-class RNAFlow(pl.LightningModule):
+class rnaefm(pl.LightningModule):
 
     def __init__(self):
-        super(RNAFlow, self).__init__()
+        super(rnaefm, self).__init__()
 
         if (torch.cuda.is_available()):
             self.folding_model = Predictor(model, torch.device("cuda"))
         else:
             self.folding_model = Predictor(model, torch.device("cpu"))
 
-        self.csv_log_path = "lightning_logs/rnaflow.csv"
+        self.csv_log_path = "lightning_logs/rnaefm.csv"
 
         self.mse_loss = nn.MSELoss()
         self.pyrimidine_indices_to_set_1 = torch.tensor([1, 5, 12])
@@ -308,7 +308,7 @@ class RNAFlow(pl.LightningModule):
                 data["rna_coords"] = crds_t_1[:,noise_mask.bool()[0]]
 
                 # run through IF (with timestep)
-                seq_loss, rna_recovery_rate, pred_rna_seq, pred_one_hot, eval_perplexity, rank_perplexity = self.denoise_model.predict_step(batch, data=data, timestep=t_1_tensor, in_rnaflow=True)
+                seq_loss, rna_recovery_rate, pred_rna_seq, pred_one_hot, eval_perplexity, rank_perplexity = self.denoise_model.predict_step(batch, data=data, timestep=t_1_tensor, in_rnaefm=True)
         
                 # IF logits are in order A, G, C, U (swapping G and C for RF2NA)
                 pred_one_hot = pred_one_hot.cpu()
@@ -349,7 +349,7 @@ class RNAFlow(pl.LightningModule):
             data["rna_coords"] = crds_t_1[:,noise_mask.bool()[0]]
 
             # run through IF (with timestep)
-            seq_loss, final_rna_recovery_rate, final_pred_rna_seq, pred_one_hot, _, _ = self.denoise_model.predict_step(batch, data=data, timestep=t_1_tensor, in_rnaflow=True)
+            seq_loss, final_rna_recovery_rate, final_pred_rna_seq, pred_one_hot, _, _ = self.denoise_model.predict_step(batch, data=data, timestep=t_1_tensor, in_rnaefm=True)
 
             # IF logits are in order A, G, C, U (swapping G and C for RF2NA)
             pred_one_hot = pred_one_hot.cpu()
