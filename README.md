@@ -74,4 +74,5 @@ python scripts/train.py
 ---
 
 
-
+## RNA-EFM Framework
+![RNA-EFM Framework](model_fig.png)
