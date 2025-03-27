@@ -20,3 +20,62 @@ The framework leverages recent advances in geometric deep learning and incorpora
 git clone [https://github.com/yourusername/RNA-EFM.git](https://github.com/abrarrahmanabir/RNA-EFM.git)
 cd RNA-EFM
 
+
+## 🔧 Environment Setup
+
+All external dependencies are listed in `environment.yml`. To set up the conda environment:
+
+```bash 
+conda env create -f environment.yml
+conda activate rnaflow
+```
+
+In addition, install the following libraries manually (ensuring CUDA compatibility if applicable):
+
+""" + "```bash\n" + """\
+pip install torch-scatter torch-cluster openmm
+""" + "```\n" + """
+
+---
+
+## 🔄 SE(3)-Transformer Setup
+
+You also need to install NVIDIA's SE(3)-Transformer. **Use the SE3Transformer version included in the repository**:
+
+""" + "```bash\n" + """\
+cd RoseTTAFold2NA/SE3Transformer
+pip install --no-cache-dir -r requirements.txt
+python setup.py install
+cd ../../
+""" + "```\n" + """
+
+---
+
+## 🚀 Running Inference
+
+Once everything is set up, you can run inference using:
+
+""" + "```bash\n" + """\
+python scripts/inference.py
+""" + "```\n" + """
+
+---
+
+## 🏋️ Running Training
+
+Make sure to download the RF2NA pre-trained weights from:
+
+https://files.ipd.uw.edu/dimaio/RF2NA_apr23.tgz
+
+Place the downloaded weight file at:
+
+`RoseTTAFold2NA/network/weights/RF2NA_apr23.pt`
+
+Then run the following command to begin training:
+
+""" + "```bash\n" + """\
+python scripts/train.py
+""" + "```\n" + """
+
+---
+"""
