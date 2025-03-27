@@ -17,7 +17,7 @@ The framework leverages recent advances in geometric deep learning and incorpora
 ## 🛠️ Installation
 
 ```bash
-git clone [https://github.com/yourusername/RNA-EFM.git](https://github.com/abrarrahmanabir/RNA-EFM.git)
+git clone https://github.com/abrarrahmanabir/RNA-EFM.git
 cd RNA-EFM
 
 ```
