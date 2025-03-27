@@ -1,4 +1,4 @@
-name: rnaflow
+name: rnaefm
 channels:
   - pytorch
   - pyg
