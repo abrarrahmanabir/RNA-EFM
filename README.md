@@ -74,5 +74,14 @@ python scripts/train.py
 ---
 
 
+## 🔗 Acknowledgement
+
+This codebase builds upon and extends the RNAFlow framework. We gratefully acknowledge their contributions and recommend citing their work if you use this repository:
+
+> **RNAFlow: Protein-Conditioned RNA Structure and Sequence Co-Design**. arXiv preprint [arXiv:2405.18768](https://arxiv.org/abs/2405.18768), 2024.  
+> [https://arxiv.org/pdf/2405.18768](https://arxiv.org/pdf/2405.18768)
+
+
+
 ## RNA-EFM Framework
 ![RNA-EFM Framework](model_fig.png)
