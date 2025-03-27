@@ -21,3 +21,19 @@ git clone [https://github.com/yourusername/RNA-EFM.git](https://github.com/abrar
 cd RNA-EFM
 
 ```
+## 🔧 Environment Setup
+
+All external dependencies are listed in \`environment.yml\`. To set up the conda environment:
+
+```bash
+conda env create -f environment.yml
+conda activate rnaflow
+```
+
+Additionally, install the following libraries manually (with CUDA compatibility if needed):
+
+```bash
+pip install torch-scatter torch-cluster openmm
+```
+
+---
