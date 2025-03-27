@@ -38,6 +38,24 @@ pip install torch-scatter torch-cluster openmm
 
 ---
 
+
+## 📂 Dataset Access
+
+The dataset used in this study can be downloaded from the following Google Drive link:
+
+👉 [RNA-EFM Dataset (Google Drive)](https://drive.google.com/drive/folders/1FPLLauKuGemoJQRoMhqmht_MRLbCgEEV?usp=sharing)
+
+After downloading, extract the contents and place them under the following directory:
+
+```
+rnaefm/data/
+```
+
+This folder will contain all necessary files required to train and evaluate RNA-EFM.
+
+---
+
+
 ##  Running Inference
 
 Once the environment is set up and dependencies are installed, you can run inference to generate RNA sequences and structures conditioned on protein backbones:
