@@ -37,3 +37,41 @@ pip install torch-scatter torch-cluster openmm
 ```
 
 ---
+
+##  Running Inference
+
+Once the environment is set up and dependencies are installed, you can run inference to generate RNA sequences and structures conditioned on protein backbones:
+
+```bash
+python scripts/inference.py 
+```
+
+RNA-EFM will automatically preprocess the input, generate interpolated backbones, and output the designed RNA structures and sequences.
+
+---
+
+## Training Instructions
+
+To train RNA-EFM from scratch:
+
+1. **Download RF2NA Weights**  
+   Download the pre-trained RF2NA weights from:
+
+   https://files.ipd.uw.edu/dimaio/RF2NA_apr23.tgz
+
+2. **Place the checkpoint** at:
+
+   `RoseTTAFold2NA/network/weights/RF2NA_apr23.pt`
+
+3. **Start Training**  
+   Run the following command:
+
+```bash
+python scripts/train.py
+```
+
+
+---
+
+
+
