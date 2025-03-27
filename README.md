@@ -27,7 +27,7 @@ All external dependencies are listed in \`environment.yml\`. To set up the conda
 
 ```bash
 conda env create -f environment.yml
-conda activate rnaflow
+conda activate rnaefm
 ```
 
 Additionally, install the following libraries manually (with CUDA compatibility if needed):
