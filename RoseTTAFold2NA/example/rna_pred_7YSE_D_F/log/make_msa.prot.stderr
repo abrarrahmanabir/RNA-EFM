@@ -1,0 +1,21 @@
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 31: hhblits: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 32: hhfilter: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 33: hhfilter: command not found
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-10.id90cov75.a3m: No such file or directory
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-10.id90cov50.a3m: No such file or directory
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 31: hhblits: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 32: hhfilter: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 33: hhfilter: command not found
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-6.id90cov75.a3m: No such file or directory
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-6.id90cov50.a3m: No such file or directory
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 31: hhblits: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 32: hhfilter: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 33: hhfilter: command not found
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-3.id90cov75.a3m: No such file or directory
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-3.id90cov50.a3m: No such file or directory
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 62: hhblits: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 63: hhfilter: command not found
+/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/input_prep/make_protein_msa.sh: line 64: hhfilter: command not found
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-3.bfd.id90cov75.a3m: No such file or directory
+grep: /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-3.bfd.id90cov50.a3m: No such file or directory
+cp: cannot stat '/home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_7YSE_D_F/hhblits/t000_.1e-3.bfd.id90cov50.a3m': No such file or directory

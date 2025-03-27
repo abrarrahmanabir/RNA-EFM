@@ -1,0 +1,666 @@
+import csv
+import random
+import lightning.pytorch as pl
+import os
+import sys
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import RNA
+
+network_path = os.path.join('RoseTTAFold2NA/network')
+sys.path.append(network_path)
+from predict import Predictor
+
+utils_path = os.path.join('rnaflow/utils')
+sys.path.append(utils_path)
+import frame_utils
+import pdb_utils
+from interpolant import Interpolant, _centered_gaussian, NM_TO_ANG_SCALE
+
+from models.inverse_folding import InverseFoldingModel
+
+model = "RoseTTAFold2NA/network/weights/RF2NA_apr23.pt"
+RF_DATA_FOLDER = "rnaflow/data/rf_data"
+
+
+
+
+
+
+
+import torch
+
+def compute_lennard_jones_energy(batch_coords, epsilon=0.2, sigma=3.5, min_distance=0.5):
+    """
+    Computes total Lennard-Jones energy (fa_atr, fa_rep, fa_intra_rep) for a batch of RNA structures.
+    
+    Args:
+        batch_coords (torch.Tensor): Tensor of shape (batchsize, L, 3, 3) representing backbone atom coordinates.
+        epsilon (float): Depth of the potential well for Lennard-Jones energy.
+        sigma (float): Distance at which the potential is zero for Lennard-Jones energy.
+        min_distance (float): Minimum allowable distance to avoid division by zero.
+    
+    Returns:
+        torch.Tensor: Tensor of shape (batchsize) with the total energy for each structure.
+    """
+    batchsize, L, _, _ = batch_coords.shape
+
+    # Flatten coordinates for inter-residue calculations (batchsize, L*3, 3)
+    coords_flat = batch_coords.view(batchsize, -1, 3)  # Shape: (batchsize, L*3, 3)
+
+    # Compute pairwise distances for inter-residue terms (fa_atr, fa_rep)
+    distances = torch.cdist(coords_flat, coords_flat)  # Shape: (batchsize, L*3, L*3)
+
+    # Clamp distances to avoid division by very small numbers
+    distances = torch.clamp(distances, min=min_distance)
+
+    # print(distances)
+
+    # Lennard-Jones attractive term (fa_atr)
+    fa_atr = -4 * epsilon * (sigma / distances)**6
+
+    # Lennard-Jones repulsive term (fa_rep)
+    fa_rep = 4 * epsilon * (sigma / distances)**12
+
+    # Mask diagonal (self-interactions) to exclude them
+    mask = torch.eye(coords_flat.shape[1], device=batch_coords.device).unsqueeze(0)  # Shape: (1, L*3, L*3)
+    fa_atr = fa_atr.masked_fill(mask.bool(), 0)
+    fa_rep = fa_rep.masked_fill(mask.bool(), 0)
+
+    # Compute pairwise distances for intra-residue term (fa_intra_rep)
+    intra_distances = torch.cdist(batch_coords, batch_coords)  # Shape: (batchsize, L, 3, 3)
+    intra_distances = torch.clamp(intra_distances, min=min_distance)
+
+    # Lennard-Jones intra-residue repulsion term (fa_intra_rep)
+    fa_intra_rep = 4 * epsilon * (sigma / intra_distances)**12
+
+    # Sum energies for each structure in the batch
+    total_fa_atr = fa_atr.sum(dim=(1, 2))  # Sum over all pairwise interactions
+    total_fa_rep = fa_rep.sum(dim=(1, 2))  # Sum over all pairwise interactions
+    total_fa_intra_rep = fa_intra_rep.sum(dim=(2, 3))  # Sum over intra-residue interactions
+
+    # Combine energies
+    total_energy = total_fa_atr + total_fa_rep + total_fa_intra_rep.sum(dim=1)  # Shape: (batchsize)
+
+    return total_energy
+
+
+
+class RNAFlow(pl.LightningModule):
+
+    def __init__(self):
+        super(RNAFlow, self).__init__()
+
+        if (torch.cuda.is_available()):
+            self.folding_model = Predictor(model, torch.device("cuda"))
+        else:
+            self.folding_model = Predictor(model, torch.device("cpu"))
+
+        self.csv_log_path = "lightning_logs/rnaflow.csv"
+
+        self.mse_loss = nn.MSELoss()
+        self.pyrimidine_indices_to_set_1 = torch.tensor([1, 5, 12])
+        self.adenine_indices_to_set_1 = torch.tensor([1, 5, 21])
+        self.guanine_indices_to_set_1 = torch.tensor([1, 5, 22])
+        self.nucleotide_mapping = {'A': 0, 'C': 1, 'G': 2, 'U': 3} 
+        
+        # freeze RF2NA
+        for param in self.folding_model.model.parameters():
+            param.requires_grad=False
+            param.data = param.data.float()
+
+        self.interpolant = Interpolant()
+        self.denoise_model = InverseFoldingModel()
+
+        self.epoch_rmsds = []
+        self.epoch_rna_aars = []
+
+        self.val_epoch_rmsds = []
+        self.val_epoch_rna_aars = []
+            
+    def model_step(self, pdb_id, data, fold_cplx=False):
+
+
+        sample = random.uniform(0, 1)
+        # noise RNA coords (gaussian prior)
+        true_crds = torch.cat((data["prot_coords"][0], data["rna_coords"][0]),axis=0)[None,:]
+        noise_mask = torch.cat((torch.zeros((1, data["prot_coords"].shape[1])), torch.ones((1, data["rna_coords"].shape[1]))), dim=1)
+        noisy_rna_crds, timestep = self.interpolant.corrupt_coords(true_crds, noise_mask)
+        data["rna_coords"] = noisy_rna_crds
+
+        if sample <= 0.5 :
+
+            # run through IF (with timestep)
+            seq_loss, rna_recovery_rate, pred_rna_seq, pred_one_hot = self.denoise_model.model_step(data, timestep, noisy=True)
+            pred_one_hot = pred_one_hot.cpu()
+            pred_one_hot = torch.cat((torch.zeros(pred_one_hot.shape[0],27), 
+                                    pred_one_hot[:,0:1], pred_one_hot[:,2:3],
+                                    pred_one_hot[:,1:2], pred_one_hot[:,3:], 
+                                    torch.zeros(pred_one_hot.shape[0],1)), dim=-1)[None,:]
+
+
+            pred_rna_bb_crds_aligned, struct_loss, rna_rmsd, plddt = self.run_folding(pdb_id, data, pred_rna_seq, true_crds, pred_one_hot, fold_cplx=fold_cplx)
+
+            # supervise on cross entropy and MSE
+            return seq_loss, struct_loss, rna_recovery_rate, pred_rna_seq, rna_rmsd
+        
+        else :
+
+            K = random.randint(1, 2)
+
+            with torch.no_grad():
+                seq_loss, rna_recovery_rate, pred_rna_seq, pred_one_hot = self.denoise_model.model_step(data, timestep, noisy=True)
+                pred_one_hot = pred_one_hot.cpu()
+                pred_one_hot = torch.cat((torch.zeros(pred_one_hot.shape[0],27), 
+                                        pred_one_hot[:,0:1], pred_one_hot[:,2:3],
+                                        pred_one_hot[:,1:2], pred_one_hot[:,3:], 
+                                        torch.zeros(pred_one_hot.shape[0],1)), dim=-1)[None,:]
+
+
+                pred_rna_bb_crds_aligned, struct_loss, rna_rmsd, plddt = self.run_folding(pdb_id, data, pred_rna_seq, true_crds, pred_one_hot, fold_cplx=fold_cplx)
+
+            rnalist = []
+            mfeLoss = []
+            energyLoss = []
+            sequenceLoss = []
+
+            for i in range(K):
+
+                data["rna_coords"] = pred_rna_bb_crds_aligned
+
+
+                seq_loss, rna_recovery_rate, pred_rna_seq, pred_one_hot = self.denoise_model.model_step(data, timestep, noisy=True) # pred_rna_bb_crds_aligned
+
+                fc  = RNA.fold_compound(pred_rna_seq)
+                (ss, mfe) = fc.mfe()
+
+                mfeLoss.append(mfe)
+
+                sequenceLoss.append(seq_loss)
+
+
+
+                pred_one_hot = pred_one_hot.cpu()
+                pred_one_hot = torch.cat((torch.zeros(pred_one_hot.shape[0],27), 
+                                        pred_one_hot[:,0:1], pred_one_hot[:,2:3],
+                                        pred_one_hot[:,1:2], pred_one_hot[:,3:], 
+                                        torch.zeros(pred_one_hot.shape[0],1)), dim=-1)[None,:]
+
+
+                pred_rna_bb_crds_aligned, struct_loss, rna_rmsd, plddt = self.run_folding(pdb_id, data, pred_rna_seq, true_crds, pred_one_hot, fold_cplx=fold_cplx)
+
+                energyLoss.append(compute_lennard_jones_energy(pred_rna_bb_crds_aligned))
+
+                rnalist.append(struct_loss)
+
+            idLoss = sum(rnalist) / len(rnalist)
+            mL = sum(mfeLoss) / len(mfeLoss)
+            sL = sum(energyLoss) / len(energyLoss)
+
+            return sum(sequenceLoss) / len(sequenceLoss), (idLoss+mL+sL), rna_recovery_rate, pred_rna_seq, rna_rmsd
+
+
+
+
+
+
+        
+
+            
+    def training_step(self, batch):
+        pdb_id, data = batch
+        pdb_id = pdb_id[0]
+
+        # zero center RNA coords (leaking this in train)
+        rna_centroid = torch.mean(data["rna_coords"], dim=(1,2))
+        data["rna_coords"] -= rna_centroid
+        data["prot_coords"] -= rna_centroid
+
+        seq_loss, struct_loss, rna_recovery_rate, pred_rna_seq, rna_rmsd = self.model_step(pdb_id, data, fold_cplx=False)
+
+        # print(seq_loss, struct_loss, rna_recovery_rate)
+
+        
+        outputs = {"rna_recovery_rate": rna_recovery_rate, "rna_rmsd": rna_rmsd}
+        self.epoch_rmsds.append(outputs["rna_rmsd"])
+        self.epoch_rna_aars.append(outputs["rna_recovery_rate"])
+        if seq_loss is None or struct_loss is None:
+            return torch.Tensor([0]).to("cuda")
+        else:
+            # print(seq_loss + struct_loss)
+            return seq_loss + struct_loss
+
+    def validation_step(self, batch):
+        pdb_id, data = batch
+        pdb_id = pdb_id[0]
+
+        # # zero center RNA coords (leaking this in train on purpose)
+        # rna_centroid = torch.mean(data["rna_coords"], dim=(1,2))
+        # data["rna_coords"] -= rna_centroid
+        # data["prot_coords"] -= rna_centroid
+
+        # seq_loss, struct_loss, rna_recovery_rate, pred_rna_seq, rna_rmsd = self.model_step(pdb_id, data, fold_cplx=False)
+        # outputs = {"rna_recovery_rate": rna_recovery_rate, "rna_rmsd": rna_rmsd}
+        # self.val_epoch_rmsds.append(outputs["rna_rmsd"])
+        # self.val_epoch_rna_aars.append(outputs["rna_recovery_rate"])
+        # if seq_loss is None or struct_loss is None:
+        #     self.log("val_loss", torch.Tensor([0]).to("cuda"))
+        # else:
+        #     self.log("val_loss", seq_loss + struct_loss)
+
+    def predict_step(self, batch):
+        pdb_id, data = batch
+        pdb_id = pdb_id[0]
+
+        if not os.path.exists(f"output_pdbs/{pdb_id}"):
+            os.mkdir(f"output_pdbs/{pdb_id}")
+
+        for i in range(1):
+
+            if not os.path.exists(f"output_pdbs/{pdb_id}/sample_{i}"):
+                os.mkdir(f"output_pdbs/{pdb_id}/sample_{i}")
+                os.mkdir(f"output_pdbs/{pdb_id}/sample_{i}/traj")
+        
+            true_cplx_crds = torch.cat((data["prot_coords"][0], data["rna_coords"][0]),axis=0)[None,:]
+            noise_mask = torch.cat((torch.zeros((1, data["prot_coords"].shape[1])), torch.ones((1, data["rna_coords"].shape[1]))), dim=1)
+            
+            # initial dock guess
+            rand_rna_seq = "A" * len(data["rna_seq"][0])
+            rand_one_hot = torch.zeros((1,len(rand_rna_seq),32))
+            rand_one_hot[:,:,27] = 1
+            with torch.inference_mode(False):
+                pred_docked_cplx, struct_loss, rna_rmsd, plddt = self.run_folding(pdb_id, data, rand_rna_seq, true_cplx_crds, rand_one_hot, fold_cplx=True) # passing true for RMSD calc
+                if type(pred_docked_cplx) != torch.Tensor:
+                    outputs = {"rna_rmsd": 0, "rna_recovery": 0, "pdb_ids": pdb_id, "pred_seqs": "X"}
+                    self.log_to_csv(outputs)
+                    return None
+                
+            # align coords to dock guess
+            true_rna_aligned, _, _ = frame_utils.kabsch(data["rna_coords"].view(1,-1,3), pred_docked_cplx[noise_mask.bool()[0]].view(1,-1,3)) # [B, 3*L, 3]
+            true_prot_aligned, _, _ = frame_utils.kabsch(data["prot_coords"].view(1,-1,3), pred_docked_cplx[~noise_mask.bool()[0]].view(1,-1,3))
+            data["rna_coords"] = true_rna_aligned.view(1,-1,3,3)
+            data["prot_coords"] = true_prot_aligned.view(1,-1,3,3)
+
+            # zero center RNA coords (with predicted RNA centroid)
+            rna_centroid = torch.mean(data["rna_coords"], dim=(1,2))
+            data["rna_coords"] -= rna_centroid
+            data["prot_coords"] -= rna_centroid
+            realigned_true_cplx_crds = torch.cat((data["prot_coords"][0], data["rna_coords"][0]),axis=0)[None,:]
+
+            # sample prior
+            trans_0 = _centered_gaussian(1, int(noise_mask.sum().item()*3), true_cplx_crds.device) * NM_TO_ANG_SCALE
+            prior_crds = trans_0.view(1, -1, 3, 3)
+            prior_cplx_crds = torch.cat((realigned_true_cplx_crds[:,~noise_mask[0].bool()], prior_crds), dim=1) # RNA noise centered at zero
+
+            ts = torch.linspace(0.01, 1.0, 5)
+            t_1 = ts[0]
+
+            prot_traj = [prior_cplx_crds]
+            idx = 0
+            for t_2 in ts[1:]:
+
+                t_1_tensor = torch.Tensor([t_1]).to(true_cplx_crds.device)
+
+                crds_t_1 = prot_traj[-1]
+                trans_t_1 = crds_t_1[:,noise_mask.bool()[0]].view(1,-1,3)
+                data["prot_coords"] = crds_t_1[:,~noise_mask.bool()[0]]
+                data["rna_coords"] = crds_t_1[:,noise_mask.bool()[0]]
+
+                # run through IF (with timestep)
+                seq_loss, rna_recovery_rate, pred_rna_seq, pred_one_hot, eval_perplexity, rank_perplexity = self.denoise_model.predict_step(batch, data=data, timestep=t_1_tensor, in_rnaflow=True)
+        
+                # IF logits are in order A, G, C, U (swapping G and C for RF2NA)
+                pred_one_hot = pred_one_hot.cpu()
+                pred_one_hot = torch.cat((torch.zeros(pred_one_hot.shape[0],27), 
+                                        pred_one_hot[:,0:1], pred_one_hot[:,2:3],
+                                        pred_one_hot[:,1:2], pred_one_hot[:,3:], 
+                                        torch.zeros(pred_one_hot.shape[0],1)), dim=-1)[None,:]
+                
+
+                # run through RF2NA
+                with torch.inference_mode(False):
+                    pred_bb_crds, struct_loss, rna_rmsd, plddt = self.run_folding(pdb_id, data, pred_rna_seq, true_cplx_crds, pred_one_hot, fold_cplx=True) # passing true for RMSD calc
+
+                # zero center pred RNA
+                rna_centroid = torch.mean(pred_bb_crds[noise_mask[0].bool()], dim=(0,1))
+                pred_bb_crds_zeroed = pred_bb_crds - rna_centroid
+                pdb_utils.save_rna_pdb(pred_bb_crds_zeroed[noise_mask[0].bool()], data["rna_seq"][0], f"output_pdbs/{pdb_id}/sample_{i}/traj/t_{idx}.pdb")
+
+                # interpolate the RNA coords (all zero centered)
+                pred_trans_1 = pred_bb_crds_zeroed[noise_mask[0].bool()].contiguous().view(1,-1,3)
+                d_t = t_2 - t_1
+                trans_t_2 = self.interpolant._trans_euler_step(d_t, t_1, pred_trans_1, trans_t_1)
+
+                # align true prot to pred prot
+                true_prot_aligned, _, _ = frame_utils.kabsch(true_cplx_crds[:,~noise_mask[0].bool()].view(1,-1,3), pred_bb_crds_zeroed[~noise_mask.bool()[0]].view(1,-1,3))
+                true_prot_aligned = true_prot_aligned.view(1,-1,3,3)
+                crds_t_2 = torch.cat((true_prot_aligned, trans_t_2.view(1, -1, 3, 3)), dim=1)
+
+                prot_traj.append(crds_t_2)
+                t_1 = t_2
+                idx+=1
+
+            # Final step
+            t_1 = ts[-1]
+            t_1_tensor = torch.Tensor([t_1]).to(self.device)
+            crds_t_1 = prot_traj[-1]
+            trans_t_1 = crds_t_1[:,noise_mask.bool()[0]].view(1,-1,3)
+            data["rna_coords"] = crds_t_1[:,noise_mask.bool()[0]]
+
+            # run through IF (with timestep)
+            seq_loss, final_rna_recovery_rate, final_pred_rna_seq, pred_one_hot, _, _ = self.denoise_model.predict_step(batch, data=data, timestep=t_1_tensor, in_rnaflow=True)
+
+            # IF logits are in order A, G, C, U (swapping G and C for RF2NA)
+            pred_one_hot = pred_one_hot.cpu()
+            pred_one_hot = torch.cat((torch.zeros(pred_one_hot.shape[0],27), 
+                                    pred_one_hot[:,0:1], pred_one_hot[:,2:3],
+                                    pred_one_hot[:,1:2], pred_one_hot[:,3:], 
+                                    torch.zeros(pred_one_hot.shape[0],1)), dim=-1)[None,:]
+
+            # run through RF2NA
+            with torch.inference_mode(False):
+                pred_bb_crds, final_struct_loss, final_rna_rmsd, final_plddt = self.run_folding(pdb_id, data, pred_rna_seq, true_cplx_crds, pred_one_hot, fold_cplx=True)
+            
+            # zero center pred complex on pred RNA
+            rna_centroid = torch.mean(pred_bb_crds[noise_mask[0].bool()], dim=(0,1))
+            pred_bb_crds_zeroed = pred_bb_crds - rna_centroid
+            pdb_utils.save_rna_pdb(pred_bb_crds_zeroed[noise_mask[0].bool()], data["rna_seq"][0], f"output_pdbs/{pdb_id}/sample_{i}/traj/t_{idx}.pdb")
+
+            # align true prot to pred prot
+            true_prot_aligned, _, _ = frame_utils.kabsch(true_cplx_crds[:,~noise_mask[0].bool()].view(1,-1,3), pred_bb_crds_zeroed[None,~noise_mask.bool()[0]].view(1,-1,3))
+            true_prot_aligned = true_prot_aligned.view(1,-1,3,3)
+
+            # final complex crds
+            final_pred_cplx_crds = torch.cat((true_prot_aligned, pred_bb_crds[None,noise_mask[0].bool()]), dim=1)
+            pdb_utils.save_cplx_pdb(final_pred_cplx_crds[0], data["prot_seq"][0], data["rna_seq"][0], f"output_pdbs/{pdb_id}/sample_{i}/final_cplx.pdb")
+
+            lddt = self.calc_lddt(pred_bb_crds[None, None, :, 1], true_cplx_crds[0, :, 1]).item()
+            print(f"lDDT: {lddt}, Recovery Rate: {final_rna_recovery_rate.item()}")
+            
+            outputs = {"rna_lddt": lddt, "rna_recovery": final_rna_recovery_rate.item(), "pdb_ids": pdb_id, "pred_seqs": final_pred_rna_seq}
+            self.log_to_csv(outputs)
+
+    def on_train_epoch_end(self):
+        avg_rna_rmsd = sum(self.epoch_rmsds)/len(self.epoch_rmsds)
+        avg_rna_aar = sum(self.epoch_rna_aars)/len(self.epoch_rna_aars)
+
+        logs = {"epoch": self.current_epoch, "avg_rna_rmsd": avg_rna_rmsd, "avg_rna_aar": avg_rna_aar}
+        self.log_to_csv(logs)
+
+        self.epoch_rmsds = []
+        self.epoch_rna_aars = []
+
+    def on_val_epoch_end(self):
+        avg_rna_rmsd = sum(self.val_epoch_rmsds)/len(self.val_epoch_rmsds)
+        avg_rna_aar = sum(self.val_epoch_rna_aars)/len(self.val_epoch_rna_aars)
+
+        logs = {"epoch": self.current_epoch, "avg_rna_rmsd": avg_rna_rmsd, "avg_rna_aar": avg_rna_aar}
+        self.log_to_csv(logs)
+
+        self.val_epoch_rmsds = []
+        self.val_epoch_rna_aars = []
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(
+            params=self.denoise_model.model.parameters(),
+            lr=0.001
+        )
+    
+    def featurize(self, pdb_id: str, rna_seq_input: str = None, pred_one_hot: torch.Tensor = None, fold_cplx: bool = True):
+        prot_a3m = os.path.join(RF_DATA_FOLDER, pdb_id, "prot.a3m")
+        prot_hhr = os.path.join(RF_DATA_FOLDER, pdb_id, "prot.hhr")
+        prot_atab = os.path.join(RF_DATA_FOLDER, pdb_id, "prot.atab")
+        rna_afa = os.path.join(RF_DATA_FOLDER, pdb_id, "rna.afa")
+
+
+        if fold_cplx:
+            inputs = f"P:{prot_a3m}:{prot_hhr}:{prot_atab} R:{rna_afa}"
+        else:
+            inputs = f"R:{rna_afa}"
+
+        # print(inputs)
+        outs = self.folding_model.prep_inputs(inputs, ffdb=None, rna_seq_input=rna_seq_input, pred_one_hot=pred_one_hot)
+        # print(outs)
+        return outs
+    
+    def run_folding(self, pdb_id, data, rna_seq, true_crds=None, pred_one_hot=None, fold_cplx=True, grk2=False):
+        if true_crds is None:
+            true_crds = torch.cat((data["prot_coords"][0], data["rna_coords"][0]),axis=0)[None,:].to("cuda")
+
+        rna_mask = torch.cat((torch.zeros((1, data["prot_coords"].shape[1])), torch.ones((1, data["rna_coords"].shape[1]))), dim=1)
+
+        rna_codes = torch.tensor([self.nucleotide_mapping[n] for n in rna_seq])
+        backbone_mask_tensor = torch.zeros(len(rna_seq), 36)
+
+        backbone_mask_tensor[torch.nonzero(rna_codes==1), self.pyrimidine_indices_to_set_1] = 1
+        backbone_mask_tensor[torch.nonzero(rna_codes==3), self.pyrimidine_indices_to_set_1] = 1
+        backbone_mask_tensor[torch.nonzero(rna_codes==0), self.adenine_indices_to_set_1] = 1
+        backbone_mask_tensor[torch.nonzero(rna_codes==2), self.guanine_indices_to_set_1] = 1
+        if fold_cplx:
+            backbone_mask_tensor = torch.cat((torch.zeros((len(data["prot_seq"][0]), 36)), backbone_mask_tensor), dim=0)
+            backbone_mask_tensor[:len(data["prot_seq"][0]),:3] = 1
+        backbone_mask_tensor = backbone_mask_tensor[:,:,None].repeat((1,1,3)).to("cuda")
+
+        outs = self.featurize(pdb_id, rna_seq, pred_one_hot, fold_cplx=fold_cplx)
+
+
+        if len(outs) == 4:
+            return outs
+        else:
+            seq_i, pred_crds, logit_pae, mask_t_2d, same_chain, plddt = self.folding_model.run_rf_module(*outs)
+
+            if not fold_cplx: # train
+                
+                pred_bb_crds = torch.masked_select(pred_crds[0], backbone_mask_tensor.bool()).reshape((backbone_mask_tensor.shape[0],3,3))
+
+                if grk2:
+                    rna_mask[:,50] = 0
+                    rna_mask[:,65:74] = 0
+                    pred_bb_crds = pred_bb_crds[rna_mask.bool()[0,50:]]
+
+                pred_bb_crds, _, _ = frame_utils.kabsch(pred_bb_crds[None,:].contiguous().view(1,-1,3), true_crds[:,rna_mask.bool()[0]].view(1,-1,3))
+                pred_bb_crds = pred_bb_crds.view(1,-1,3,3)
+
+                rna_aligned_rna_mse = self.mse_loss(pred_bb_crds, true_crds[0,rna_mask.bool()[0]])
+                rna_aligned_rna_rmsd = torch.sqrt(rna_aligned_rna_mse).cpu().item()
+                plddt = torch.mean(plddt).cpu().item()
+            
+            else: # inference
+                try:
+                    pred_bb_crds = torch.masked_select(pred_crds[0], backbone_mask_tensor.bool()).reshape((backbone_mask_tensor.shape[0],3,3))
+
+                    pred_bb_crds_aligned, _, _ = frame_utils.kabsch(pred_bb_crds[None].view(1,-1,3), true_crds[:].view(1,-1,3)) # just for MSE
+                    pred_bb_crds_aligned = pred_bb_crds_aligned.view(1,-1,3,3)
+                    cplx_aligned_cplx_mse = self.mse_loss(pred_bb_crds_aligned, true_crds[0])
+                    cplx_aligned_cplx_rmsd = torch.sqrt(cplx_aligned_cplx_mse).cpu().item()
+                    plddt = torch.mean(plddt).cpu().item()
+                    return pred_bb_crds, cplx_aligned_cplx_mse, cplx_aligned_cplx_rmsd, plddt
+
+                except Exception as e:
+                    print(e)
+                    print("template mismatch")
+                    return None, None, None, None
+
+            
+            return pred_bb_crds, rna_aligned_rna_mse, rna_aligned_rna_rmsd, plddt
+        
+    def log_to_csv(self, outputs):
+        fieldnames = ["epoch"] + list(outputs.keys())
+
+        # Check if the CSV file exists, create it if not
+        write_header = not os.path.exists(self.csv_log_path)
+        with open(self.csv_log_path, mode="a", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            # Write header if the file is newly created
+            if write_header:
+                writer.writeheader()
+
+            # Write values for the current step
+            row = {"epoch": self.trainer.current_epoch}
+            for key, value in outputs.items():
+                if torch.is_tensor(value):
+                    row[key] = value.item()
+                else:
+                    row[key] = value
+            writer.writerow(row)
+
+    def calc_lddt(self, pred_ca, true_ca, eps=1e-6):
+        # Input
+        # pred_ca: predicted CA coordinates (I, B, L, 3)
+        # true_ca: true CA coordinates (B, L, 3)
+
+        I, B, L = pred_ca.shape[:3]
+        mask_crds = torch.ones((1,1,L)).to(pred_ca.device)
+
+        pred_ca = pred_ca.contiguous()
+        true_ca = true_ca.contiguous()
+
+        pred_dist = torch.cdist(pred_ca, pred_ca) # (I, B, L, L)
+        true_dist = torch.cdist(true_ca, true_ca).unsqueeze(0) # (1, B, L, L)
+
+        mask = torch.logical_and(true_dist > 0.0, true_dist < 15.0) # (1, B, L, L)
+        mask_crds = mask_crds * (mask[0].sum(dim=-1) != 0)
+        
+        delta = torch.abs(pred_dist-true_dist) # (I, B, L, L)
+
+        true_lddt = torch.zeros((I,B,L), device=pred_ca.device)
+        for distbin in [0.5, 1.0, 2.0, 4.0]:
+            true_lddt += 0.25*torch.sum((delta<=distbin)*mask, dim=-1) / (torch.sum(mask, dim=-1) + eps)
+        
+        true_lddt = mask_crds*true_lddt
+        true_lddt = true_lddt.sum(dim=(1,2)) / (mask_crds.sum() + eps)
+        return true_lddt
+    
+    def design_rna(self, prot_seq, prot_coords, rna_len, input_folder_path):
+        """
+        prot_seq: str
+        prot_coords: N x 3 x 3
+        """
+
+        noise_mask = torch.cat((torch.zeros((1, len(prot_seq))), torch.ones((1, rna_len))), dim=1)
+
+        # initial dock guess
+        rand_rna_seq = "A" * rna_len
+        rand_one_hot = torch.zeros((1,len(rand_rna_seq),32))
+        rand_one_hot[:,:,27] = 1
+        with torch.inference_mode(False):
+            pred_docked_cplx  = self.run_folding_for_design(prot_seq, rand_rna_seq, rand_one_hot, input_folder_path)
+            if type(pred_docked_cplx) != torch.Tensor:
+                print("RF2NA Error.")
+                return None
+            
+        prot_coords = prot_coords.to(pred_docked_cplx.device)
+        true_prot_aligned, _, _ = frame_utils.kabsch(prot_coords.view(1,-1,3), pred_docked_cplx[~noise_mask.bool()[0]].view(1,-1,3))
+        true_prot_aligned = true_prot_aligned.view(1,-1,3,3)
+        
+        # sample prior
+        trans_0 = _centered_gaussian(1, int(noise_mask.sum().item()*3), true_prot_aligned.device) * NM_TO_ANG_SCALE
+        prior_crds = trans_0.view(1, -1, 3, 3)
+        prior_cplx_crds = torch.cat((true_prot_aligned, prior_crds), dim=1) # RNA noise centered at zero
+
+        ts = torch.linspace(0.01, 1.0, 5)
+        t_1 = ts[0]
+
+        prot_traj = [prior_cplx_crds]
+        idx = 0
+        for t_2 in ts[1:]:
+
+            t_1_tensor = torch.Tensor([t_1]).to(true_prot_aligned.device)
+
+            crds_t_1 = prot_traj[-1]
+            trans_t_1 = crds_t_1[:,noise_mask.bool()[0]].view(1,-1,3)
+
+            # run through IF (with timestep)
+            pred_rna_seq, pred_one_hot = self.denoise_model.design_rna(prot_seq, crds_t_1[0,~noise_mask.bool()[0]], rand_rna_seq, crds_t_1[0,noise_mask.bool()[0]], t_1_tensor) # pass in rand_rna_seq (gets masked)
+    
+            # IF logits are in order A, G, C, U (swapping G and C for RF2NA)
+            pred_one_hot = pred_one_hot.cpu()
+            pred_one_hot = torch.cat((torch.zeros(pred_one_hot.shape[0],27), 
+                                    pred_one_hot[:,0:1], pred_one_hot[:,2:3],
+                                    pred_one_hot[:,1:2], pred_one_hot[:,3:], 
+                                    torch.zeros(pred_one_hot.shape[0],1)), dim=-1)[None,:]
+            
+
+            # run through RF2NA
+            with torch.inference_mode(False):
+                pred_bb_crds = self.run_folding_for_design(prot_seq, pred_rna_seq, pred_one_hot, input_folder_path)
+
+            # zero center pred RNA
+            rna_centroid = torch.mean(pred_bb_crds[noise_mask[0].bool()], dim=(0,1))
+            pred_bb_crds_zeroed = pred_bb_crds - rna_centroid
+
+            # interpolate the RNA coords (all zero centered)
+            pred_trans_1 = pred_bb_crds_zeroed[noise_mask[0].bool()].contiguous().view(1,-1,3)
+            d_t = t_2 - t_1
+            trans_t_2 = self.interpolant._trans_euler_step(d_t, t_1, pred_trans_1, trans_t_1)
+
+            # align true prot to pred prot
+            true_prot_aligned, _, _ = frame_utils.kabsch(prot_coords.view(1,-1,3), pred_bb_crds_zeroed[~noise_mask.bool()[0]].view(1,-1,3))
+            true_prot_aligned = true_prot_aligned.view(1,-1,3,3)
+            crds_t_2 = torch.cat((true_prot_aligned, trans_t_2.view(1, -1, 3, 3)), dim=1)
+
+            prot_traj.append(crds_t_2)
+            t_1 = t_2
+            idx+=1
+
+        # Final step
+        t_1 = ts[-1]
+        t_1_tensor = torch.Tensor([t_1]).to(self.device)
+        crds_t_1 = prot_traj[-1]
+        trans_t_1 = crds_t_1[:,noise_mask.bool()[0]].view(1,-1,3)
+
+        # run through IF (with timestep)
+        final_pred_rna_seq, pred_one_hot = self.denoise_model.design_rna(prot_seq, crds_t_1[0,~noise_mask.bool()[0]], rand_rna_seq, crds_t_1[0,noise_mask.bool()[0]], t_1_tensor) # pass in rand_rna_seq (gets masked)
+
+        # IF logits are in order A, G, C, U (swapping G and C for RF2NA)
+        pred_one_hot = pred_one_hot.cpu()
+        pred_one_hot = torch.cat((torch.zeros(pred_one_hot.shape[0],27), 
+                                pred_one_hot[:,0:1], pred_one_hot[:,2:3],
+                                pred_one_hot[:,1:2], pred_one_hot[:,3:], 
+                                torch.zeros(pred_one_hot.shape[0],1)), dim=-1)[None,:]
+
+        # run through RF2NA
+        with torch.inference_mode(False):
+            pred_bb_crds = self.run_folding_for_design(prot_seq, pred_rna_seq, pred_one_hot, input_folder_path)
+        
+        # zero center pred complex on pred RNA
+        rna_centroid = torch.mean(pred_bb_crds[noise_mask[0].bool()], dim=(0,1))
+        pred_bb_crds_zeroed = pred_bb_crds - rna_centroid
+
+        # align true prot to pred prot
+        true_prot_aligned, _, _ = frame_utils.kabsch(prot_coords.view(1,-1,3), pred_bb_crds_zeroed[~noise_mask.bool()[0]].view(1,-1,3))
+        true_prot_aligned = true_prot_aligned.view(1,-1,3,3)
+
+        # final complex crds
+        final_pred_cplx_crds = torch.cat((true_prot_aligned, pred_bb_crds[None,noise_mask[0].bool()]), dim=1)
+
+        return final_pred_rna_seq, final_pred_cplx_crds[0]
+            
+            
+    def run_folding_for_design(self, prot_seq, rna_seq, pred_one_hot, input_folder_path):
+
+        rna_codes = torch.tensor([self.nucleotide_mapping[n] for n in rna_seq])
+        backbone_mask_tensor = torch.zeros(len(rna_seq), 36)
+
+        backbone_mask_tensor[torch.nonzero(rna_codes==1), self.pyrimidine_indices_to_set_1] = 1
+        backbone_mask_tensor[torch.nonzero(rna_codes==3), self.pyrimidine_indices_to_set_1] = 1
+        backbone_mask_tensor[torch.nonzero(rna_codes==0), self.adenine_indices_to_set_1] = 1
+        backbone_mask_tensor[torch.nonzero(rna_codes==2), self.guanine_indices_to_set_1] = 1
+        backbone_mask_tensor = torch.cat((torch.zeros((len(prot_seq), 36)), backbone_mask_tensor), dim=0)
+        backbone_mask_tensor[:len(prot_seq),:3] = 1
+        backbone_mask_tensor = backbone_mask_tensor[:,:,None].repeat((1,1,3)).to("cuda")
+
+        prot_a3m = os.path.join(input_folder_path, "prot.a3m")
+        prot_hhr = os.path.join(input_folder_path, "prot.hhr")
+        prot_atab = os.path.join(input_folder_path, "prot.atab")
+        rna_afa = os.path.join(input_folder_path, "rna.afa")
+        inputs = f"P:{prot_a3m}:{prot_hhr}:{prot_atab} R:{rna_afa}"
+        outs = self.folding_model.prep_inputs(inputs, ffdb=None, rna_seq_input=rna_seq, pred_one_hot=pred_one_hot)
+
+        seq_i, pred_crds, logit_pae, mask_t_2d, same_chain, plddt = self.folding_model.run_rf_module(*outs)
+
+        pred_bb_crds = torch.masked_select(pred_crds[0], backbone_mask_tensor.bool()).reshape((backbone_mask_tensor.shape[0],3,3))
+        plddt = torch.mean(plddt).cpu().item()
+        return pred_bb_crds

@@ -1,0 +1,5 @@
+out_prefix /home/abrar/rl/rd/rnaflow/RoseTTAFold2NA/example/rna_pred_4BPB_A_D/prot
+Running HHblits against UniRef30 with E-value cutoff 1e-10
+Running HHblits against UniRef30 with E-value cutoff 1e-6
+Running HHblits against UniRef30 with E-value cutoff 1e-3
+Running HHblits against BFD with E-value cutoff 1e-3
