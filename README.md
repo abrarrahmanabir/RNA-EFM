@@ -14,6 +14,10 @@ The framework leverages recent advances in geometric deep learning and incorpora
 - **Idempotent Refinement**: Predictive consistency is enforced by repeatedly applying the structure predictor until convergence.
 - **Biological Relevance**: Designed RNAs exhibit improved thermodynamic stability and better binding affinity with the target protein.
 
+
+## RNA-EFM Framework
+![RNA-EFM Framework](model_fig.png)
+
 ## 🛠️ Installation
 
 ```bash
@@ -101,5 +105,3 @@ This codebase builds upon and extends the RNAFlow framework. We gratefully ackno
 
 
 
-## RNA-EFM Framework
-![RNA-EFM Framework](model_fig.png)
